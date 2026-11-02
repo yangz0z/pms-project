@@ -85,6 +85,19 @@ class ApiIntegrationTest : IntegrationTest() {
 	}
 
 	@Test
+	fun `같은 결제가 다른 예약으로 오면 409 PAYMENT_CONFLICT`() {
+		stock(until = checkOut.plusDays(2))
+		postHold(holdJson("req-1"))
+		postHold(holdJson("req-2", from = "2030-11-12", until = "2030-11-13"))
+		postPayment("pay-1", 1L)
+
+		postPayment("pay-1", 2L).andExpect {
+			status { isConflict() }
+			jsonPath("$.code") { value("PAYMENT_CONFLICT") }
+		}
+	}
+
+	@Test
 	fun `없는 예약의 결제는 404`() {
 		postPayment("pay-1", 999L).andExpect {
 			status { isNotFound() }

@@ -187,6 +187,47 @@ class PaymentIntegrationTest : IntegrationTest() {
 	}
 
 	@Test
+	fun `같은 결제가 다른 예약으로 오면 충돌로 거부하고 재고와 예약은 그대로`() {
+		stock(total = 2)
+		val first = hold("req-1")
+		val second = hold("req-2")
+		payments.handleSuccess("pay-1", first)
+
+		assertIs<PaymentResult.PaymentConflict>(payments.handleSuccess("pay-1", second))
+
+		assertEquals("HOLD", statusOf(second))
+		assertEquals(listOf(1, 1), confirmedCounts())
+		assertEquals(listOf(1, 1), heldCounts())
+		assertEquals(emptyList(), refundRequestPaymentIds())
+	}
+
+	@Test
+	fun `같은 결제가 서로 다른 예약으로 동시에 와도 1건만 처리`() {
+		stock(total = 2)
+		repeat(10) { n ->
+			resetBookings()
+			jdbc.sql("UPDATE room_inventory SET held = 0, confirmed = 0").update()
+			val ids = listOf(hold("req-a-$n"), hold("req-b-$n"))
+			val pool = Executors.newFixedThreadPool(2)
+			val start = CountDownLatch(1)
+			val results = try {
+				val futures = ids.map { id ->
+					pool.submit(Callable { start.await(); payments.handleSuccess("pay-$n", id) })
+				}
+				start.countDown()
+				futures.map { it.get(30, TimeUnit.SECONDS) }
+			} finally {
+				pool.shutdownNow()
+			}
+
+			assertEquals(1, results.count { it is PaymentResult.Processed })
+			assertEquals(1, results.count { it is PaymentResult.PaymentConflict })
+			assertEquals(listOf(1, 1), confirmedCounts())
+			assertEquals(listOf(1, 1), heldCounts())
+		}
+	}
+
+	@Test
 	fun `없는 예약의 결제는 저장하지 않음`() {
 		assertIs<PaymentResult.ReservationNotFound>(payments.handleSuccess("pay-1", 999L))
 		assertEquals(0, jdbc.sql("SELECT count(*) FROM payment_event").query(Int::class.java).single())

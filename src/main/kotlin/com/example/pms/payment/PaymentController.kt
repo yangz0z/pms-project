@@ -32,6 +32,10 @@ class PaymentController(private val paymentService: PaymentService) {
 			is PaymentResult.Processed ->
 				ResponseEntity.ok(PaymentCallbackResponse(request.reservationId, result.status, result.duplicate))
 
+			is PaymentResult.PaymentConflict ->
+				ResponseEntity.status(HttpStatus.CONFLICT)
+					.body(ErrorResponse("PAYMENT_CONFLICT", "다른 예약에 이미 처리된 결제입니다."))
+
 			is PaymentResult.ReservationNotFound ->
 				ResponseEntity.status(HttpStatus.NOT_FOUND)
 					.body(ErrorResponse("RESERVATION_NOT_FOUND", "예약을 찾을 수 없습니다."))

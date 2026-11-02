@@ -3,6 +3,7 @@ package com.example.pms.payment
 import com.example.pms.reservation.ReservationRepository
 import com.example.pms.reservation.ReservationSettlement
 import com.example.pms.reservation.ReservationStatus
+import org.slf4j.LoggerFactory
 import org.springframework.context.ApplicationEventPublisher
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
@@ -11,6 +12,7 @@ import java.time.Clock
 sealed interface PaymentResult {
 	data class Processed(val status: ReservationStatus, val duplicate: Boolean) : PaymentResult
 	data object ReservationNotFound : PaymentResult
+	data object PaymentConflict : PaymentResult
 }
 
 @Service
@@ -23,12 +25,24 @@ class PaymentService(
 	private val clock: Clock,
 ) {
 
+	private val log = LoggerFactory.getLogger(javaClass)
+
 	@Transactional
 	fun handleSuccess(paymentId: String, reservationId: Long): PaymentResult {
 		// 이벤트 저장의 외래 키 잠금과 충돌하지 않도록 예약 행을 먼저 잠금
 		val reservation = reservations.findByIdForUpdate(reservationId) ?: return PaymentResult.ReservationNotFound
 
 		if (!events.saveIfNew(paymentId, reservationId, clock.instant())) {
+			val processedReservationId = events.findReservationId(paymentId)
+			if (processedReservationId != reservationId) {
+				log.error(
+					"다른 예약에 이미 처리된 결제: paymentId={}, reservationId={}, processedReservationId={}",
+					paymentId,
+					reservationId,
+					processedReservationId,
+				)
+				return PaymentResult.PaymentConflict
+			}
 			return PaymentResult.Processed(reservation.status, duplicate = true)
 		}
 

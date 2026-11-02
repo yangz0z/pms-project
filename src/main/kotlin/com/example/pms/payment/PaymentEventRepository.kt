@@ -11,6 +11,8 @@ interface PaymentEventRepository {
 	 * @return 처음 수신한 결제면 true, 이미 처리한 결제면 false
 	 */
 	fun saveIfNew(paymentId: String, reservationId: Long, receivedAt: Instant): Boolean
+
+	fun findReservationId(paymentId: String): Long?
 }
 
 @Repository
@@ -28,4 +30,11 @@ class JdbcPaymentEventRepository(private val jdbc: JdbcClient) : PaymentEventRep
 			.param("reservationId", reservationId)
 			.param("receivedAt", receivedAt.atOffset(ZoneOffset.UTC))
 			.update() == 1
+
+	override fun findReservationId(paymentId: String): Long? =
+		jdbc.sql("SELECT reservation_id FROM payment_event WHERE payment_id = :paymentId")
+			.param("paymentId", paymentId)
+			.query { rs, _ -> rs.getLong(1) }
+			.optional()
+			.orElse(null)
 }

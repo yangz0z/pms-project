@@ -36,6 +36,7 @@ class ApiIntegrationTest : IntegrationTest() {
 			status { isCreated() }
 			jsonPath("$.id") { value(1) }
 			jsonPath("$.status") { value("HOLD") }
+			jsonPath("$.version") { value(1) }
 			jsonPath("$.holdExpiresAt") { value("2030-01-01T00:10:00Z") }
 		}
 		postHold(holdJson("req-1")).andExpect {
@@ -119,6 +120,111 @@ class ApiIntegrationTest : IntegrationTest() {
 		postHold(holdJson("req-1", from = "2030-02-01", until = "2030-03-04")).andExpect { status { isBadRequest() } }
 		postHold(holdJson("req-1", from = "+999999999-01-01", until = "+999999999-01-02")).andExpect {
 			status { isBadRequest() }
+		}
+	}
+
+	private fun postDateChange(
+		reservationId: Long,
+		key: String,
+		from: String,
+		until: String,
+		version: Int = 1,
+	) = mvc.post("/reservations/$reservationId/date-change") {
+		contentType = MediaType.APPLICATION_JSON
+		content = """{"requestKey":"$key","version":$version,"checkIn":"$from","checkOut":"$until"}"""
+	}
+
+	@Test
+	fun `같은 requestKey를 다른 기간으로 보내면 409`() {
+		stock(until = checkOut.plusDays(1))
+		postHold(holdJson("req-1"))
+
+		postHold(holdJson("req-1", until = "2030-11-13")).andExpect {
+			status { isConflict() }
+			jsonPath("$.code") { value("REQUEST_KEY_CONFLICT") }
+		}
+	}
+
+	@Test
+	fun `날짜 변경 성공은 바뀐 기간을 반환`() {
+		stock(from = checkIn.minusDays(1))
+		postHold(holdJson("req-1"))
+
+		postDateChange(1L, "req-1", "2030-11-09", "2030-11-11").andExpect {
+			status { isOk() }
+			jsonPath("$.id") { value(1) }
+			jsonPath("$.status") { value("HOLD") }
+			jsonPath("$.version") { value(2) }
+			jsonPath("$.checkIn") { value("2030-11-09") }
+			jsonPath("$.checkOut") { value("2030-11-11") }
+		}
+	}
+
+	@Test
+	fun `날짜 변경 실패 응답`() {
+		stock(from = checkIn.minusDays(1), until = checkOut.plusDays(1))
+		postHold(holdJson("req-1"))
+		postHold(holdJson("req-2", from = "2030-11-09", until = "2030-11-10"))
+
+		postDateChange(1L, "req-1", "2030-11-09", "2030-11-11").andExpect {
+			status { isConflict() }
+			header { exists("Retry-After") }
+			jsonPath("$.code") { value("TEMPORARILY_HELD") }
+		}
+		postDateChange(1L, "req-1", "2030-11-20", "2030-11-21").andExpect {
+			status { isConflict() }
+			jsonPath("$.code") { value("SOLD_OUT") }
+		}
+		postDateChange(1L, "wrong", "2030-11-10", "2030-11-13").andExpect {
+			status { isNotFound() }
+			jsonPath("$.code") { value("RESERVATION_NOT_FOUND") }
+		}
+		postDateChange(1L, "req-1", "2030-11-13", "2030-11-12").andExpect { status { isBadRequest() } }
+	}
+
+	@Test
+	fun `버전이 현재 예약과 다르면 409 RESERVATION_CHANGED, 누락되면 400`() {
+		stock(from = checkIn.minusDays(1), until = checkOut.plusDays(1))
+		postHold(holdJson("req-1"))
+
+		postDateChange(1L, "req-1", "2030-11-09", "2030-11-11", version = 2).andExpect {
+			status { isConflict() }
+			jsonPath("$.code") { value("RESERVATION_CHANGED") }
+		}
+		mvc.post("/reservations/1/date-change") {
+			contentType = MediaType.APPLICATION_JSON
+			content = """{"requestKey":"req-1","checkIn":"2030-11-09","checkOut":"2030-11-11"}"""
+		}.andExpect { status { isBadRequest() } }
+	}
+
+	@Test
+	fun `만료된 예약의 날짜 변경은 409 NOT_CHANGEABLE`() {
+		stock()
+		postHold(holdJson("req-1"))
+		clock.advance(java.time.Duration.ofMinutes(10))
+
+		postDateChange(1L, "req-1", "2030-11-10", "2030-11-11").andExpect {
+			status { isConflict() }
+			jsonPath("$.code") { value("NOT_CHANGEABLE") }
+		}
+	}
+
+	@Test
+	fun `체크인이 지난 예약의 날짜 변경은 409 NOT_CHANGEABLE, 지난 날짜로 변경은 400`() {
+		stock(from = checkIn.minusDays(1), until = checkOut.plusDays(1))
+		postHold(holdJson("req-1"))
+		postPayment("pay-1", 1L)
+
+		clock.set(checkIn.minusDays(1).atStartOfDay().toInstant(java.time.ZoneOffset.UTC))
+		postDateChange(1L, "req-1", "2030-11-09", "2030-11-11").andExpect {
+			status { isBadRequest() }
+			jsonPath("$.code") { value("INVALID_REQUEST") }
+		}
+
+		clock.set(checkIn.atStartOfDay().toInstant(java.time.ZoneOffset.UTC))
+		postDateChange(1L, "req-1", "2030-11-11", "2030-11-13").andExpect {
+			status { isConflict() }
+			jsonPath("$.code") { value("NOT_CHANGEABLE") }
 		}
 	}
 

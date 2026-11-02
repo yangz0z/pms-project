@@ -16,7 +16,9 @@ interface ReservationRepository {
 
 	fun updateStatus(reservation: Reservation)
 
+	fun updatePeriod(reservation: Reservation)
+
 	fun findDueHoldIds(now: Instant, limit: Int): List<Long>
 
-	fun findEarliestHoldExpiry(roomTypeId: Long, period: StayPeriod): Instant?
+	fun findEarliestHoldExpiry(roomTypeId: Long, period: StayPeriod, excludingReservationId: Long? = null): Instant?
 }

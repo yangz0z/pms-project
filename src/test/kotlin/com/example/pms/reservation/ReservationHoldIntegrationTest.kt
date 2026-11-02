@@ -23,6 +23,9 @@ class ReservationHoldIntegrationTest : IntegrationTest() {
 	@Autowired
 	private lateinit var reservations: ReservationService
 
+	@Autowired
+	private lateinit var changes: ReservationDateChangeService
+
 	private fun command(key: String, from: LocalDate = checkIn, until: LocalDate = checkOut) =
 		HoldCommand(key, 1L, StayPeriod(from, until))
 
@@ -107,6 +110,43 @@ class ReservationHoldIntegrationTest : IntegrationTest() {
 		val result = assertIs<HoldResult.Held>(reservations.hold(command("req-1")))
 
 		assertTrue(result.replayed)
+	}
+
+	@Test
+	fun `같은 키를 다른 기간으로 보내면 충돌로 거부하고 예약은 그대로`() {
+		stock(from = checkIn, until = checkOut.plusDays(2))
+		reservations.hold(command("req-1"))
+
+		assertIs<HoldResult.RequestKeyConflict>(reservations.hold(command("req-1", checkIn, checkOut.plusDays(1))))
+
+		assertEquals(listOf(1, 1, 0, 0), heldCounts())
+	}
+
+	@Test
+	fun `같은 키가 다른 기간으로 동시에 와도 예약은 1건이고 나머지는 충돌`() {
+		stock(from = checkIn, until = checkIn.plusDays(12), total = 3)
+
+		val results = runConcurrently(
+			(1..5).map { n -> { reservations.hold(command("req-same", checkIn.plusDays(n * 2L), checkIn.plusDays(n * 2L + 1))) } },
+		)
+
+		assertEquals(1, results.count { it is HoldResult.Held })
+		assertEquals(4, results.count { it is HoldResult.RequestKeyConflict })
+		assertEquals(1, heldCounts().sum())
+	}
+
+	@Test
+	fun `날짜를 변경한 뒤 처음 신청이 재전송되면 변경된 예약을 반환`() {
+		stock(from = checkIn.minusDays(1), until = checkOut)
+		val held = assertIs<HoldResult.Held>(reservations.hold(command("req-1")))
+		val moved = StayPeriod(checkIn.minusDays(1), checkOut.minusDays(1))
+		changes.change(DateChangeCommand(held.reservation.id, "req-1", held.reservation.version, moved))
+
+		val replayed = assertIs<HoldResult.Held>(reservations.hold(command("req-1")))
+
+		assertTrue(replayed.replayed)
+		assertEquals(moved, replayed.reservation.period)
+		assertIs<HoldResult.RequestKeyConflict>(reservations.hold(command("req-1", moved.checkIn, moved.checkOut)))
 	}
 
 	@Test

@@ -21,6 +21,8 @@ data class StayPeriod(val checkIn: LocalDate, val checkOut: LocalDate) {
 
 	fun nightCount(): Long = ChronoUnit.DAYS.between(checkIn, checkOut)
 
+	fun nights(): List<LocalDate> = checkIn.datesUntil(checkOut).toList()
+
 	fun startsOnOrBefore(date: LocalDate): Boolean = !checkIn.isAfter(date)
 
 	private companion object {

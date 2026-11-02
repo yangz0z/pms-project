@@ -26,4 +26,6 @@ data class DailyInventory(
 	fun confirmHold(): DailyInventory = copy(held = held - 1, confirmed = confirmed + 1)
 
 	fun confirmDirectly(): DailyInventory = copy(confirmed = confirmed + 1)
+
+	fun releaseConfirmed(): DailyInventory = copy(confirmed = confirmed - 1)
 }

@@ -1,5 +1,7 @@
 package com.example.pms.inventory
 
+import java.time.LocalDate
+
 interface InventoryRepository {
 
 	/**
@@ -8,5 +10,12 @@ interface InventoryRepository {
 	 */
 	fun findAndLock(roomTypeId: Long, period: StayPeriod): StayInventory
 
+	/**
+	 * 연속되지 않은 숙박일의 재고 행을 날짜순으로 잠근 뒤 조회
+	 */
+	fun findAndLockNights(roomTypeId: Long, nights: List<LocalDate>): List<DailyInventory>
+
 	fun save(inventory: StayInventory)
+
+	fun save(days: List<DailyInventory>)
 }

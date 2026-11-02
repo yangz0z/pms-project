@@ -21,6 +21,11 @@ class JdbcReservationRepository(private val jdbc: JdbcClient) : ReservationRepos
 				rs.getObject("check_in", LocalDate::class.java),
 				rs.getObject("check_out", LocalDate::class.java),
 			),
+			requestedPeriod = StayPeriod(
+				rs.getObject("requested_check_in", LocalDate::class.java),
+				rs.getObject("requested_check_out", LocalDate::class.java),
+			),
+			version = rs.getInt("version"),
 			status = ReservationStatus.valueOf(rs.getString("status")),
 			holdExpiresAt = rs.getObject("hold_expires_at", OffsetDateTime::class.java).toInstant(),
 		)
@@ -29,8 +34,10 @@ class JdbcReservationRepository(private val jdbc: JdbcClient) : ReservationRepos
 	override fun insertIfAbsent(reservation: NewReservation): Reservation? =
 		jdbc.sql(
 			"""
-			INSERT INTO reservation (request_key, room_type_id, check_in, check_out, status, hold_expires_at)
-			VALUES (:requestKey, :roomTypeId, :checkIn, :checkOut, 'HOLD', :holdExpiresAt)
+			INSERT INTO reservation (
+				request_key, room_type_id, check_in, check_out, requested_check_in, requested_check_out, status, hold_expires_at
+			)
+			VALUES (:requestKey, :roomTypeId, :checkIn, :checkOut, :checkIn, :checkOut, 'HOLD', :holdExpiresAt)
 			ON CONFLICT (request_key) DO NOTHING
 			RETURNING *
 			""".trimIndent(),
@@ -65,6 +72,15 @@ class JdbcReservationRepository(private val jdbc: JdbcClient) : ReservationRepos
 			.update()
 	}
 
+	override fun updatePeriod(reservation: Reservation) {
+		jdbc.sql("UPDATE reservation SET check_in = :checkIn, check_out = :checkOut, version = :version WHERE id = :id")
+			.param("checkIn", reservation.period.checkIn)
+			.param("checkOut", reservation.period.checkOut)
+			.param("version", reservation.version)
+			.param("id", reservation.id)
+			.update()
+	}
+
 	override fun findDueHoldIds(now: Instant, limit: Int): List<Long> =
 		jdbc.sql(
 			"""
@@ -79,7 +95,7 @@ class JdbcReservationRepository(private val jdbc: JdbcClient) : ReservationRepos
 			.query { rs, _ -> rs.getLong("id") }
 			.list()
 
-	override fun findEarliestHoldExpiry(roomTypeId: Long, period: StayPeriod): Instant? =
+	override fun findEarliestHoldExpiry(roomTypeId: Long, period: StayPeriod, excludingReservationId: Long?): Instant? =
 		jdbc.sql(
 			"""
 			SELECT min(hold_expires_at) FROM reservation
@@ -87,8 +103,10 @@ class JdbcReservationRepository(private val jdbc: JdbcClient) : ReservationRepos
 			  AND room_type_id = :roomTypeId
 			  AND check_in < :checkOut
 			  AND check_out > :checkIn
+			  AND id <> :excludingId
 			""".trimIndent(),
 		)
+			.param("excludingId", excludingReservationId ?: NO_RESERVATION_ID)
 			.param("roomTypeId", roomTypeId)
 			.param("checkIn", period.checkIn)
 			.param("checkOut", period.checkOut)
@@ -96,4 +114,8 @@ class JdbcReservationRepository(private val jdbc: JdbcClient) : ReservationRepos
 			.single()
 
 	private fun Instant.toOffset(): OffsetDateTime = atOffset(ZoneOffset.UTC)
+
+	private companion object {
+		const val NO_RESERVATION_ID = -1L
+	}
 }

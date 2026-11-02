@@ -10,7 +10,6 @@ import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import java.time.Clock
 import java.time.Duration
-import java.time.Instant
 import java.time.LocalDate
 
 data class HoldCommand(val requestKey: String, val roomTypeId: Long, val period: StayPeriod)
@@ -19,6 +18,7 @@ sealed interface HoldResult {
 	data class Held(val reservation: Reservation, val replayed: Boolean) : HoldResult
 	data object SoldOut : HoldResult
 	data class TemporarilyHeld(val retryAfterSeconds: Long) : HoldResult
+	data object RequestKeyConflict : HoldResult
 }
 
 @Service
@@ -26,6 +26,7 @@ class ReservationService(
 	private val inventories: InventoryRepository,
 	private val reservations: ReservationRepository,
 	private val holdExpirer: HoldExpirer,
+	private val retryAdvisor: HoldRetryAdvisor,
 	private val clock: Clock,
 	@Value("\${pms.hold.ttl}") private val holdTtl: Duration,
 ) {
@@ -35,7 +36,7 @@ class ReservationService(
 	@Transactional
 	fun hold(command: HoldCommand): HoldResult {
 		// 날짜가 바뀐 뒤 도착한 재전송도 기존 예약을 돌려주도록 날짜 검사보다 먼저 확인
-		reservations.findByRequestKey(command.requestKey)?.let { return HoldResult.Held(it, replayed = true) }
+		reservations.findByRequestKey(command.requestKey)?.let { return replay(it, command) }
 
 		// 당일 예약을 받지 않아 체크인 날짜가 지난 뒤 결제가 확정되는 경우를 사실상 차단
 		if (command.period.startsOnOrBefore(LocalDate.now(clock))) {
@@ -45,11 +46,13 @@ class ReservationService(
 		val inventory = inventories.findAndLock(command.roomTypeId, command.period)
 
 		// 같은 키의 동시 요청은 위 잠금에서 대기하므로 앞선 요청의 커밋 결과를 여기서 확인 가능
-		reservations.findByRequestKey(command.requestKey)?.let { return HoldResult.Held(it, replayed = true) }
+		reservations.findByRequestKey(command.requestKey)?.let { return replay(it, command) }
 
 		return when (val attempt = inventory.tryHold()) {
 			is HoldAttempt.SoldOut -> HoldResult.SoldOut
-			is HoldAttempt.TemporarilyHeld -> HoldResult.TemporarilyHeld(retryAfterSeconds(command))
+			is HoldAttempt.TemporarilyHeld -> HoldResult.TemporarilyHeld(
+					retryAdvisor.retryAfterSeconds(command.roomTypeId, command.period),
+				)
 			is HoldAttempt.Success -> {
 				val now = clock.instant()
 				val created = reservations.insertIfAbsent(
@@ -57,7 +60,7 @@ class ReservationService(
 				)
 				if (created == null) {
 					// 같은 키가 다른 기간으로 동시에 들어와 잠금이 겹치지 않은 경우
-					HoldResult.Held(checkNotNull(reservations.findByRequestKey(command.requestKey)), replayed = true)
+					replay(checkNotNull(reservations.findByRequestKey(command.requestKey)), command)
 				} else {
 					inventories.save(attempt.inventory)
 					HoldResult.Held(created, replayed = false)
@@ -80,14 +83,14 @@ class ReservationService(
 		}
 	}
 
-	private fun retryAfterSeconds(command: HoldCommand): Long {
-		val expiry: Instant = reservations.findEarliestHoldExpiry(command.roomTypeId, command.period)
-			?: return MIN_RETRY_AFTER_SECONDS
-		return Duration.between(clock.instant(), expiry).seconds.coerceAtLeast(MIN_RETRY_AFTER_SECONDS)
-	}
+	private fun replay(existing: Reservation, command: HoldCommand): HoldResult =
+		if (existing.matchesRequest(command.roomTypeId, command.period)) {
+			HoldResult.Held(existing, replayed = true)
+		} else {
+			HoldResult.RequestKeyConflict
+		}
 
 	private companion object {
 		const val EXPIRE_BATCH_SIZE = 100
-		const val MIN_RETRY_AFTER_SECONDS = 1L
 	}
 }

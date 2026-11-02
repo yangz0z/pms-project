@@ -2,6 +2,7 @@ package com.example.pms.support
 
 import com.example.pms.TestcontainersConfiguration
 import com.example.pms.payment.RefundGateway
+import com.example.pms.payment.RefundResult
 import org.junit.jupiter.api.BeforeEach
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
@@ -10,12 +11,14 @@ import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Import
 import org.springframework.context.annotation.Primary
 import org.springframework.jdbc.core.simple.JdbcClient
+import org.springframework.test.context.TestPropertySource
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 import java.time.ZoneOffset
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CopyOnWriteArrayList
 
 class MutableClock(private var now: Instant) : Clock() {
@@ -34,9 +37,21 @@ class MutableClock(private var now: Instant) : Clock() {
 
 class RecordingRefundGateway : RefundGateway {
 	val refundedPaymentIds = CopyOnWriteArrayList<String>()
+	val results = ConcurrentLinkedQueue<RefundResult>()
 
-	override fun refund(paymentId: String, reservationId: Long) {
+	@Volatile
+	var onRefund: () -> Unit = {}
+
+	override fun refund(paymentId: String, reservationId: Long): RefundResult {
 		refundedPaymentIds.add(paymentId)
+		onRefund()
+		return results.poll() ?: RefundResult.Succeeded
+	}
+
+	fun reset() {
+		refundedPaymentIds.clear()
+		results.clear()
+		onRefund = {}
 	}
 }
 
@@ -54,8 +69,9 @@ class IntegrationTestConfiguration {
 
 val START: Instant = Instant.parse("2030-01-01T00:00:00Z")
 
-// 스케줄러가 테스트 중 시각 변경에 반응하지 않도록 비활성화하고 만료는 직접 실행
-@SpringBootTest(properties = ["pms.hold.sweep-enabled=false"])
+// 스케줄러가 테스트 중 시각 변경에 반응하지 않도록 비활성화하고 만료와 환불은 직접 실행
+@SpringBootTest(properties = ["pms.hold.sweep-enabled=false", "pms.refund.sweep-enabled=false"])
+@TestPropertySource(properties = ["pms.refund.dispatch-enabled=false"])
 @Import(TestcontainersConfiguration::class, IntegrationTestConfiguration::class)
 abstract class IntegrationTest {
 
@@ -73,10 +89,20 @@ abstract class IntegrationTest {
 
 	@BeforeEach
 	fun resetState() {
-		jdbc.sql("TRUNCATE payment_event, reservation, room_inventory RESTART IDENTITY").update()
+		resetBookings()
+		jdbc.sql("TRUNCATE room_inventory").update()
 		clock.set(START)
-		refunds.refundedPaymentIds.clear()
+		refunds.reset()
 	}
+
+	protected fun resetBookings() {
+		jdbc.sql("TRUNCATE refund_request, payment_event, reservation RESTART IDENTITY").update()
+	}
+
+	protected fun refundRequestPaymentIds(): List<String> =
+		jdbc.sql("SELECT payment_id FROM refund_request ORDER BY id")
+			.query { rs, _ -> rs.getString(1) }
+			.list()
 
 	protected fun stock(from: LocalDate = checkIn, until: LocalDate = checkOut, total: Int = 1, roomTypeId: Long = 1L) {
 		from.datesUntil(until).forEach { date ->

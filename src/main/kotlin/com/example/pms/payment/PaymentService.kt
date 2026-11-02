@@ -3,6 +3,7 @@ package com.example.pms.payment
 import com.example.pms.reservation.ReservationRepository
 import com.example.pms.reservation.ReservationSettlement
 import com.example.pms.reservation.ReservationStatus
+import org.springframework.context.ApplicationEventPublisher
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import java.time.Clock
@@ -17,7 +18,8 @@ class PaymentService(
 	private val reservations: ReservationRepository,
 	private val events: PaymentEventRepository,
 	private val settlement: ReservationSettlement,
-	private val refunds: RefundGateway,
+	private val refundRequests: RefundRequestRepository,
+	private val eventPublisher: ApplicationEventPublisher,
 	private val clock: Clock,
 ) {
 
@@ -34,7 +36,8 @@ class PaymentService(
 		// 객실 확보에 쓰이지 못한 결제는 환불. 이미 확정된 예약에 도착한 다른 결제도 포함
 		val paymentUsed = reservation.awaitsPayment() && settled.status == ReservationStatus.CONFIRMED
 		if (!paymentUsed) {
-			refunds.refund(paymentId, reservationId)
+			refundRequests.enqueue(paymentId, reservationId, clock.instant())
+			eventPublisher.publishEvent(RefundRequested)
 		}
 		return PaymentResult.Processed(settled.status, duplicate = false)
 	}

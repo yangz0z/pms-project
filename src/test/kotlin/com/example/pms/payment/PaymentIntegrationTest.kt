@@ -104,7 +104,7 @@ class PaymentIntegrationTest : IntegrationTest() {
 
 		assertEquals(ReservationStatus.CONFIRMED, result.status)
 		assertEquals(listOf(1, 1), confirmedCounts())
-		assertEquals(emptyList(), refunds.refundedPaymentIds)
+		assertEquals(emptyList(), refundRequestPaymentIds())
 	}
 
 	@Test
@@ -117,7 +117,7 @@ class PaymentIntegrationTest : IntegrationTest() {
 		val result = assertIs<PaymentResult.Processed>(payments.handleSuccess("pay-late", late))
 
 		assertEquals(ReservationStatus.REFUNDED, result.status)
-		assertEquals(listOf("pay-late"), refunds.refundedPaymentIds)
+		assertEquals(listOf("pay-late"), refundRequestPaymentIds())
 		assertEquals(listOf(1, 1), heldCounts())
 		assertEquals(listOf(0, 0), confirmedCounts())
 	}
@@ -131,7 +131,7 @@ class PaymentIntegrationTest : IntegrationTest() {
 		val result = assertIs<PaymentResult.Processed>(payments.handleSuccess("pay-2", id))
 
 		assertEquals(ReservationStatus.CONFIRMED, result.status)
-		assertEquals(listOf("pay-2"), refunds.refundedPaymentIds)
+		assertEquals(listOf("pay-2"), refundRequestPaymentIds())
 		assertEquals(listOf(1, 1), confirmedCounts())
 	}
 
@@ -146,16 +146,15 @@ class PaymentIntegrationTest : IntegrationTest() {
 		val result = assertIs<PaymentResult.Processed>(payments.handleSuccess("pay-2", late))
 
 		assertEquals(ReservationStatus.REFUNDED, result.status)
-		assertEquals(listOf("pay-1", "pay-2"), refunds.refundedPaymentIds)
+		assertEquals(listOf("pay-1", "pay-2"), refundRequestPaymentIds())
 	}
 
 	@Test
 	fun `만료 후 결제와 새 신청이 동시에 와도 재고를 초과하지 않음`() {
 		stock()
 		repeat(10) { n ->
-			jdbc.sql("TRUNCATE payment_event, reservation").update()
+			resetBookings()
 			jdbc.sql("UPDATE room_inventory SET held = 0, confirmed = 0").update()
-			refunds.refundedPaymentIds.clear()
 			val late = hold("req-late-$n")
 			expireHolds()
 			val pool = Executors.newFixedThreadPool(2)
@@ -182,7 +181,7 @@ class PaymentIntegrationTest : IntegrationTest() {
 				assertEquals(listOf(0, 0), confirmedCounts())
 				assertEquals(listOf(1, 1), heldCounts())
 				assertIs<HoldResult.Held>(newHold)
-				assertEquals(listOf("pay-$n"), refunds.refundedPaymentIds)
+				assertEquals(listOf("pay-$n"), refundRequestPaymentIds())
 			}
 		}
 	}
@@ -197,7 +196,7 @@ class PaymentIntegrationTest : IntegrationTest() {
 	fun `만료 작업과 결제 성공이 동시에 실행돼도 재고가 어긋나지 않음`() {
 		stock()
 		repeat(10) { n ->
-			jdbc.sql("TRUNCATE payment_event, reservation").update()
+			resetBookings()
 			jdbc.sql("UPDATE room_inventory SET held = 0, confirmed = 0").update()
 			val id = hold("req-$n")
 			clock.advance(Duration.ofMinutes(10))

@@ -6,6 +6,7 @@ import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc
 import org.springframework.http.MediaType
 import org.springframework.test.web.servlet.MockMvc
+import org.springframework.test.web.servlet.get
 import org.springframework.test.web.servlet.post
 
 @AutoConfigureMockMvc
@@ -106,5 +107,34 @@ class ApiIntegrationTest : IntegrationTest() {
 		postHold(holdJson("req-1", from = "+999999999-01-01", until = "+999999999-01-02")).andExpect {
 			status { isBadRequest() }
 		}
+	}
+
+	@Test
+	fun `운영자는 상태별 환불 요청을 조회`() {
+		stock(total = 2)
+		postHold(holdJson("req-1"))
+		postPayment("pay-1", 1L)
+		postPayment("pay-2", 1L)
+
+		mvc.get("/ops/refund-requests?status=PENDING").andExpect {
+			status { isOk() }
+			jsonPath("$[0].paymentId") { value("pay-2") }
+			jsonPath("$[0].reservationId") { value(1) }
+			jsonPath("$[0].status") { value("PENDING") }
+			jsonPath("$[0].attempts") { value(0) }
+		}
+		mvc.get("/ops/refund-requests?status=NEEDS_REVIEW").andExpect {
+			status { isOk() }
+			jsonPath("$.length()") { value(0) }
+		}
+	}
+
+	@Test
+	fun `환불 요청 조회의 상태가 잘못되면 400`() {
+		mvc.get("/ops/refund-requests?status=UNKNOWN").andExpect {
+			status { isBadRequest() }
+			jsonPath("$.code") { value("INVALID_REQUEST") }
+		}
+		mvc.get("/ops/refund-requests").andExpect { status { isBadRequest() } }
 	}
 }

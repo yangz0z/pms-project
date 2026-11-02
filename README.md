@@ -74,162 +74,11 @@
 | 11/10 ~ 11/12 → 11/20 ~ 11/22 | 11/20, 11/21 | 11/10, 11/11 | 없음           |
 
 
-## 설계 판단
+## 주요 설계 판단
 
-### 재고를 신청 시점에 점유
-
-결제 후에 재고를 차감하면 늦게 결제한 고객은 돈을 낸 뒤에 실패합니다. 신청 시점에 점유하면 결제 전에 거절할 수 있습니다. 대신 결제하지 않는 고객이 최대 10분 동안 재고를 묶습니다.
-
-### 실패 사유를 두 가지로 구분
-
-점유 때문에 재고가 없으면 잠시 뒤 예약이 가능할 수 있고, 확정으로 재고가 없으면 기다려도 예약할 수 없습니다. 고객에게 필요한 안내가 다르므로 응답을 나눕니다.
-
-
-| 응답 코드              | 조건                                             | 안내                            |
-| ------------------ | ---------------------------------------------- | ----------------------------- |
-| `TEMPORARILY_HELD` | 모든 숙박일에 확정되지 않은 객실이 있으나 점유 때문에 가용 재고가 없는 날이 있음 | 잠시 후 다시 시도 (`Retry-After` 포함) |
-| `SOLD_OUT`         | 숙박일 중 하루라도 확정으로 만실이거나 판매하지 않는 날짜 포함            | 다른 날짜 선택                      |
-
-
-### 날짜순으로 재고 행을 잠금
-
-연박 신청은 숙박일별 재고 행을 함께 변경합니다. 겹치는 기간의 요청이 서로 다른 순서로 행을 잠그면 deadlock이 생길 수 있어, `SELECT ... ORDER BY stay_date FOR UPDATE`로 항상 날짜순으로 잠급니다. 잠근 뒤 읽은 값으로 실패 사유도 판단합니다.
-
-날짜 변경은 추가 날짜와 해제 날짜가 연속되지 않을 수 있습니다. 따로 잠그면 서로 상대의 날짜로 옮기는 두 변경이 교착될 수 있어, 합친 뒤 날짜순으로 한 번에 잠급니다.
-
-### 중복 요청은 유니크 제약으로 처리
-
-- 신청 재전송: `reservation.request_key`
-- 결제 알림 중복: `payment_event.payment_id`
-
-애플리케이션의 사전 조회만으로는 동시에 들어온 두 요청을 막을 수 없어 데이터베이스 제약을 기준으로 삼습니다.
-
-같은 `requestKey`를 다른 내용으로 보내면 다른 날짜로 예약된 줄 착각할 수 있어 `REQUEST_KEY_CONFLICT`로 거부합니다. 날짜를 변경한 뒤 처음 신청이 늦게 재전송되어도 충돌로 처리되지 않도록, 처음 요청한 기간을 별도 컬럼에 저장해 비교합니다.
-
-같은 `paymentId`가 다른 예약으로 도착하면 연동 오류로 보고 `PAYMENT_CONFLICT`로 거부하며 오류 로그를 남깁니다. 정상 응답을 주면 처리되지 않은 결제가 묻히기 때문입니다.
-
-### 환불 기록을 먼저 커밋한 뒤 호출
-
-결제사 호출을 트랜잭션 안에서 하면 응답을 기다리는 동안 예약 행 잠금이 유지되고, 호출 후 롤백되면 환불 기록 없이 돈만 돌려줄 수 있습니다. 그래서 예약 상태와 환불 요청을 한 트랜잭션에 저장하고, 커밋 직후 별도 스레드에서 호출합니다.
-
-
-| 상황         | 처리                                                   |
-| ---------- | ---------------------------------------------------- |
-| 호출 성공      | `COMPLETED`                                          |
-| 일시 실패      | 10초, 1분, 5분, 15분 뒤 재시도. 5번째 시도까지 실패하면 `NEEDS_REVIEW` |
-| 결제사 거절     | 바로 `NEEDS_REVIEW`                                    |
-| 호출 중 서버 중단 | 1분 뒤 다시 처리                                           |
-
-
-재시도는 최대 10초 주기의 작업이 처리하므로 실제 호출은 표의 시각보다 조금 늦을 수 있습니다. 여러 작업이 동시에 돌아도 `FOR UPDATE SKIP LOCKED`로 요청을 1건씩 나눠 가집니다.
-
-## 코드 구조
-
-업무 단위로 패키지를 나눴고, 의존 방향은 `payment → reservation → inventory` 한 방향입니다.
-
-
-| 패키지           | 책임                             | 주요 클래스                                                                                                      |
-| ------------- | ------------------------------ | ----------------------------------------------------------------------------------------------------------- |
-| `inventory`   | 재고 판단과 수량 변경                   | `StayPeriod`, `DailyInventory`, `StayInventory`, `StayChange`, `InventoryRepository`                        |
-| `reservation` | 예약 상태 전이, 점유, 만료, 날짜 변경, 결제 반영 | `Reservation`, `ReservationService`, `ReservationDateChangeService`, `HoldExpirer`, `ReservationSettlement` |
-| `payment`     | 결제 알림 중복 처리와 환불 재시도            | `PaymentService`, `RefundRequest`, `RefundProcessor`, `RefundGateway`                                       |
-| `web`         | 공통 오류 응답                       | `ApiExceptionHandler`                                                                                       |
-
-
-## 데이터 모델
-
-
-| 테이블              | 역할            | 주요 컬럼                                                                                                                            |
-| ---------------- | ------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `room_inventory` | 객실 타입·날짜별 재고  | `room_type_id`, `stay_date`, `total`, `confirmed`, `held`                                                                        |
-| `reservation`    | 예약과 상태        | `request_key`, `room_type_id`, `check_in`, `check_out`, `status`, `hold_expires_at`, `requested_check_in`, `requested_check_out`, `version` |
-| `payment_event`  | 처리한 결제 알림     | `payment_id`, `reservation_id`, `received_at`                                                                                    |
-| `refund_request` | 환불 요청과 재시도 상태 | `payment_id`, `reservation_id`, `status`, `attempts`, `next_attempt_at`, `last_error`                                            |
-
-
-체크아웃 날짜는 숙박일에 포함하지 않습니다. 11/10 ~ 11/12 예약은 11/10과 11/11의 재고를 사용합니다.
-
-## API
-
-### 예약 신청
-
-```http
-POST /reservations
-Content-Type: application/json
-
-{
-  "requestKey": "req-abc",
-  "roomTypeId": 1,
-  "checkIn": "2030-11-10",
-  "checkOut": "2030-11-12"
-}
-```
-
-
-| 응답    | 조건                                         | 본문 또는 코드                                                                                                         |
-| ----- | ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
-| `201` | 새로 점유                                      | `{"id":1,"status":"HOLD","version":1,"checkIn":"2030-11-10","checkOut":"2030-11-12","holdExpiresAt":"2030-11-02T01:10:00Z"}` |
-| `200` | 같은 `requestKey` 재전송                        | 기존 예약을 같은 형식으로 반환                                                                                                |
-| `409` | 점유 때문에 재고 없음                               | `TEMPORARILY_HELD`, `Retry-After` 헤더 포함                                                                          |
-| `409` | 확정으로 만실이거나 판매하지 않는 날짜 포함                   | `SOLD_OUT`                                                                                                       |
-| `409` | 같은 `requestKey`로 다른 내용의 예약이 있음             | `REQUEST_KEY_CONFLICT`                                                                                           |
-| `400` | 입력 오류, 당일 또는 지난 날짜, 체크인이 체크아웃보다 늦음, 30박 초과 | `INVALID_REQUEST`                                                                                                |
-
-
-### 예약 날짜 변경
-
-```http
-POST /reservations/1/date-change
-Content-Type: application/json
-
-{
-  "requestKey": "req-abc",
-  "version": 1,
-  "checkIn": "2030-11-09",
-  "checkOut": "2030-11-11"
-}
-```
-
-
-| 응답    | 조건                                                  | 본문 또는 코드                                |
-| ----- | --------------------------------------------------- | --------------------------------------- |
-| `200` | 변경 완료 또는 현재와 같은 날짜로 재전송 (체크인이 지난 예약 포함)             | 예약 신청과 같은 형식                            |
-| `409` | 추가 날짜가 점유 중                                         | `TEMPORARILY_HELD`, `Retry-After` 헤더 포함 |
-| `409` | 추가 날짜가 확정으로 만실이거나 판매하지 않음                           | `SOLD_OUT`                              |
-| `409` | `EXPIRED`, `REFUNDED`, 만료 시각이 지난 점유, 체크인이 오늘 이전인 예약 | `NOT_CHANGEABLE`                        |
-| `409` | 요청의 `version`이 현재 예약과 다름 | `RESERVATION_CHANGED` |
-| `404` | 없는 예약 또는 `requestKey` 불일치                           | `RESERVATION_NOT_FOUND`                 |
-| `400` | 입력 오류, 새 체크인이 오늘 이전, 30박 초과                         | `INVALID_REQUEST`                       |
-
-
-### 결제 성공 알림
-
-```http
-POST /payments/callback
-Content-Type: application/json
-
-{
-  "paymentId": "pay-1",
-  "reservationId": 1
-}
-```
-
-
-| 응답    | 조건                 | 본문 또는 코드                                                     |
-| ----- | ------------------ | ------------------------------------------------------------ |
-| `200` | 처리 완료              | `{"reservationId":1,"status":"CONFIRMED","duplicate":false}` |
-| `200` | 이미 처리한 `paymentId` | 현재 상태와 `"duplicate":true`                                    |
-| `409` | 같은 `paymentId`가 다른 예약으로 도착 | `PAYMENT_CONFLICT`, 재고와 예약 유지 |
-| `404` | 없는 예약              | `RESERVATION_NOT_FOUND`                                      |
-
-
-### 환불 요청 조회
-
-```http
-GET /ops/refund-requests?status=NEEDS_REVIEW
-```
-
-`status`는 `PENDING`, `COMPLETED`, `NEEDS_REVIEW` 중 하나이며, 최근 100건을 반환합니다.
+- 재고를 신청 시점에 점유해, 결제 후 실패하는 일을 막음
+- 재고 행을 날짜순으로 잠가 교착을 막음
+- 환불 요청을 예약과 함께 저장한 뒤 호출해, 장애에도 환불이 누락되지 않게 함
 
 ## 실행 방법
 
@@ -278,3 +127,8 @@ HOLD 1건, TEMPORARILY_HELD 19건
 ## 기술 스택
 
 Kotlin, Spring Boot, Spring JDBC(`JdbcClient`), PostgreSQL, Flyway, JUnit 5, Testcontainers
+
+## 더 보기
+
+- [설계 판단과 코드 구조](docs/design.md): 왜 이렇게 만들었는지
+- [API](docs/api.md): 요청과 응답 형식
